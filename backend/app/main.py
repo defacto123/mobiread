@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import threading
 import uuid
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -47,6 +48,23 @@ def _get_engine() -> TTSEngine:
     if _engine is None:
         _engine = get_engine(settings)
     return _engine
+
+
+@app.on_event("startup")
+def _warm_engine() -> None:
+    """Eagerly build the engine and run a tiny synthesis so the (kept-warm)
+    instance has the model loaded before the first real request. Runs in a
+    background thread and is best-effort: any failure falls back to the normal
+    lazy load on the first /chunk request and never blocks startup/health."""
+
+    def _load() -> None:
+        try:
+            _get_engine().synthesize("Warm up.", voice=settings.tts_voice)
+            logger.info("TTS engine warmed up")
+        except Exception:
+            logger.exception("TTS engine warm-up failed (will lazy-load on demand)")
+
+    threading.Thread(target=_load, name="tts-warmup", daemon=True).start()
 
 
 @app.get("/health", response_model=HealthResponse)
