@@ -257,6 +257,23 @@ export function usePlayer(docId: string | null, numChunks: number, voice?: strin
     [docId, numChunks, loadChunk, ensureAudio, prefetchNext, state.rate],
   );
 
+  // When the voice changes mid-document, drop cached (old-voice) audio and
+  // re-synthesize the current chunk at the same position + play state.
+  const prevVoiceRef = useRef<string | undefined>(voice);
+  useEffect(() => {
+    if (prevVoiceRef.current === voice) return;
+    prevVoiceRef.current = voice;
+    if (!docId) return;
+    const audio = audioRef.current;
+    const resumeAt = audio?.currentTime ?? 0;
+    const wasPlaying = state.isPlaying;
+    cacheRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
+    cacheRef.current = new Map();
+    lastWordRef.current = -1;
+    void goToChunk(state.currentChunk, resumeAt, wasPlaying);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voice, docId]);
+
   // Wire the audio "ended" handler to auto-advance.
   useEffect(() => {
     const audio = ensureAudio();

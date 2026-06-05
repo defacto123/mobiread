@@ -37,6 +37,9 @@ class Settings(BaseSettings):
 
     # CORS
     cors_origins: str = "http://localhost:5173"
+    # Optional regex of allowed origins (e.g. all of this service's Cloud Run
+    # URLs). Matched in addition to the exact cors_origins list.
+    cors_origin_regex: str = ""
 
     # Networking
     request_timeout_seconds: int = 120
