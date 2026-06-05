@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+tmp/
+.pytest_cache/
+models/
+*.onnx
+*.bin

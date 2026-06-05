@@ -1,0 +1,6 @@
+# Self-hosted Kokoro-82M TTS via ONNX Runtime (CPU).
+# Enabled with TTS_ENGINE=local_kokoro. Keeps the image GPU-free.
+kokoro-onnx==0.4.9
+onnxruntime==1.20.1
+soundfile==0.13.0
+numpy==2.2.1

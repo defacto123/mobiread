@@ -1,0 +1,96 @@
+name: Deploy to Cloud Run
+
+# Deploys both services on merge to main (CI/CD - never from the IDE).
+# Manual runs are allowed via the "Run workflow" button.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGION: ${{ secrets.GCP_REGION }}
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REPO: mobiread
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure project
+        run: gcloud config set project "$PROJECT_ID"
+
+      # --- Backend: build, push, deploy (self-hosted Kokoro, CPU) ---
+      - name: Build backend image
+        run: |
+          gcloud builds submit ./backend \
+            --tag "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/backend:${GITHUB_SHA::7}"
+
+      - name: Deploy backend
+        run: |
+          gcloud run deploy mobiread-backend \
+            --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/backend:${GITHUB_SHA::7}" \
+            --region="$REGION" --platform=managed --allow-unauthenticated \
+            --cpu=4 --memory=4Gi --min-instances=0 --max-instances=10 \
+            --concurrency=1 --timeout=600 \
+            --set-env-vars=TTS_ENGINE=local_kokoro,TTS_VOICE=af_bella,KOKORO_LANG=en-us,ALIGN_BACKEND=proportional,ENABLE_ALIGNMENT=true
+
+      - name: Read backend URL
+        id: backend
+        run: |
+          URL=$(gcloud run services describe mobiread-backend --region="$REGION" --format='value(status.url)')
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      # --- Frontend: build with API URL baked in, deploy ---
+      - name: Build frontend image
+        run: |
+          cat > /tmp/frontend-build.yaml <<EOF
+          steps:
+            - name: gcr.io/cloud-builders/docker
+              args:
+                - build
+                - --build-arg
+                - VITE_API_BASE=${{ steps.backend.outputs.url }}
+                - -t
+                - ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/frontend:${GITHUB_SHA::7}
+                - .
+          images:
+            - ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/frontend:${GITHUB_SHA::7}
+          options:
+            logging: CLOUD_LOGGING_ONLY
+          EOF
+          gcloud builds submit ./frontend --config=/tmp/frontend-build.yaml
+
+      - name: Deploy frontend
+        run: |
+          gcloud run deploy mobiread-frontend \
+            --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/frontend:${GITHUB_SHA::7}" \
+            --region="$REGION" --platform=managed --allow-unauthenticated \
+            --cpu=1 --memory=512Mi --min-instances=0 --max-instances=10
+
+      - name: Read frontend URL
+        id: frontend
+        run: |
+          URL=$(gcloud run services describe mobiread-frontend --region="$REGION" --format='value(status.url)')
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      # --- Lock backend CORS to the frontend origin ---
+      - name: Update backend CORS
+        run: |
+          gcloud run services update mobiread-backend --region="$REGION" \
+            --update-env-vars=CORS_ORIGINS="${{ steps.frontend.outputs.url }}"
+
+      - name: Summary
+        run: |
+          echo "Backend:  ${{ steps.backend.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Frontend: ${{ steps.frontend.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
