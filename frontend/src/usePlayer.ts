@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchChunk } from "./api";
 import type { LoadedChunk } from "./types";
 
-/** A tiny silent WAV used to "unlock" the audio element on the first user
+/** A tiny silent WAV used to "unlock" the audio elements on the first user
  * gesture so later programmatic playback works under mobile autoplay policies
  * (notably iOS Safari), even when a tap is followed by an async chunk fetch. */
 function buildSilentWavDataUri(): string {
@@ -45,6 +45,7 @@ interface PlayerState {
   rate: number;
   activeWord: number;
   loading: boolean;
+  voiceLoading: boolean;
   error: string | null;
 }
 
@@ -56,66 +57,196 @@ const INITIAL: PlayerState = {
   rate: 1,
   activeWord: -1,
   loading: false,
+  voiceLoading: false,
   error: null,
 };
 
 /**
  * Drives sequential, chunk-by-chunk playback of a document.
  *
- * Responsibilities:
- * - lazy-load + cache each chunk's audio (with word timings)
- * - prefetch the next chunk while the current one plays
- * - auto-advance across chunks on end
- * - expose play/pause/seek/skip/rate + karaoke word tracking
+ * Design goals:
+ * - Gapless paragraph transitions: two audio elements ping-pong, so the next
+ *   chunk is already buffered when the current one ends.
+ * - Seamless voice switching: the current chunk keeps playing while the new
+ *   voice is synthesized in the background, then swaps in at the same position
+ *   (no silence, no waiting for the paragraph to end).
+ * - Race-proof: a generation token discards stale loads, and interrupted
+ *   play() promises are treated as non-fatal so controls never get stuck.
  */
 export function usePlayer(docId: string | null, numChunks: number, voice?: string) {
   const [state, setState] = useState<PlayerState>(INITIAL);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Two audio elements; `activeIdx` is the one currently playing, the other is
+  // used to pre-buffer the upcoming chunk.
+  const audiosRef = useRef<HTMLAudioElement[]>([]);
+  const activeIdxRef = useRef(0);
+  const preloadIdxRef = useRef(-1); // chunk index buffered in the idle element
+
   const cacheRef = useRef<Map<number, LoadedChunk>>(new Map());
   const rafRef = useRef<number | null>(null);
-  const lastWordRef = useRef<number>(-1);
-  const lastTimePushRef = useRef<number>(0);
+  const lastWordRef = useRef(-1);
+  const lastTimePushRef = useRef(0);
+  const genRef = useRef(0);
 
-  // Reset everything when a new document is loaded.
-  useEffect(() => {
-    cacheRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
-    cacheRef.current = new Map();
-    lastWordRef.current = -1;
-    setState({ ...INITIAL });
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.removeAttribute("src");
-    }
-  }, [docId]);
+  // Mirror props/state into refs so the long-lived audio event handlers and
+  // async flows always read fresh values without stale closures.
+  const currentChunkRef = useRef(0);
+  const isPlayingRef = useRef(false);
+  const rateRef = useRef(1);
+  const docIdRef = useRef(docId);
+  const numChunksRef = useRef(numChunks);
+  const voiceRef = useRef(voice);
+  docIdRef.current = docId;
+  numChunksRef.current = numChunks;
 
-  const ensureAudio = useCallback((): HTMLAudioElement => {
-    if (!audioRef.current) {
-      audioRef.current = new Audio();
+  const advanceRef = useRef<() => void>(() => {});
+  const preloadNextRef = useRef<() => void>(() => {});
+
+  const idle = () => audiosRef.current[1 - activeIdxRef.current];
+  const active = () => audiosRef.current[activeIdxRef.current];
+
+  const ensureAudios = useCallback((): HTMLAudioElement[] => {
+    if (audiosRef.current.length === 0) {
+      const make = () => {
+        const a = new Audio();
+        a.preload = "auto";
+        a.addEventListener("ended", (ev) => {
+          // Only the element that is actually playing should auto-advance.
+          if (ev.target === audiosRef.current[activeIdxRef.current]) advanceRef.current();
+        });
+        return a;
+      };
+      audiosRef.current = [make(), make()];
     }
-    return audioRef.current;
+    return audiosRef.current;
   }, []);
 
-  // Unlock audio playback on the first user gesture (mobile/iOS autoplay).
+  // Cache-aware fetch using the *current* voice (read from ref).
+  const fetchData = useCallback(async (index: number): Promise<LoadedChunk | null> => {
+    if (!docIdRef.current || index < 0 || index >= numChunksRef.current) return null;
+    const cached = cacheRef.current.get(index);
+    if (cached) return cached;
+    const loaded = await fetchChunk(docIdRef.current, index, voiceRef.current);
+    cacheRef.current.set(index, loaded);
+    return loaded;
+  }, []);
+
+  // Pre-buffer the next chunk into the idle audio element.
+  const preloadNext = useCallback(() => {
+    const nextIdx = currentChunkRef.current + 1;
+    if (nextIdx >= numChunksRef.current) return;
+    if (preloadIdxRef.current === nextIdx) return;
+    void fetchData(nextIdx)
+      .then((data) => {
+        if (!data || currentChunkRef.current + 1 !== nextIdx) return;
+        const el = idle();
+        el.src = data.audioUrl;
+        el.playbackRate = rateRef.current;
+        el.load();
+        preloadIdxRef.current = nextIdx;
+      })
+      .catch(() => {
+        /* best-effort */
+      });
+  }, [fetchData]);
+  preloadNextRef.current = preloadNext;
+
+  // Auto-advance to the next chunk, using the pre-buffered element when ready
+  // so the transition is gapless.
+  const advance = useCallback(async () => {
+    const nextIdx = currentChunkRef.current + 1;
+    if (nextIdx >= numChunksRef.current) {
+      isPlayingRef.current = false;
+      setState((s) => ({ ...s, isPlaying: false, activeWord: -1 }));
+      return;
+    }
+
+    // Natural progression takes ownership: invalidates any in-flight voice swap
+    // or jump so they can't fight this transition.
+    const gen = ++genRef.current;
+    const incoming = idle();
+    let data = cacheRef.current.get(nextIdx) ?? null;
+    const alreadyBuffered = preloadIdxRef.current === nextIdx && !!incoming.src;
+    if (!alreadyBuffered) {
+      data = await fetchData(nextIdx);
+      if (!data || gen !== genRef.current) return;
+      incoming.src = data.audioUrl;
+      incoming.playbackRate = rateRef.current;
+      incoming.load();
+    }
+    if (!data) data = cacheRef.current.get(nextIdx) ?? null;
+    if (!data || gen !== genRef.current) return;
+
+    try {
+      incoming.currentTime = 0;
+    } catch {
+      /* not yet seekable; play() still starts from 0 */
+    }
+    activeIdxRef.current = 1 - activeIdxRef.current;
+    preloadIdxRef.current = -1;
+    currentChunkRef.current = nextIdx;
+    lastWordRef.current = -1;
+    setState((s) => ({
+      ...s,
+      currentChunk: nextIdx,
+      duration: data!.duration,
+      currentTime: 0,
+      activeWord: -1,
+    }));
+    try {
+      await incoming.play();
+      isPlayingRef.current = true;
+    } catch {
+      /* interrupted play() is non-fatal */
+    }
+    preloadNextRef.current();
+  }, [fetchData]);
+  advanceRef.current = () => {
+    void advance();
+  };
+
+  // Reset when a new document is loaded.
+  useEffect(() => {
+    genRef.current++;
+    cacheRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
+    cacheRef.current = new Map();
+    preloadIdxRef.current = -1;
+    currentChunkRef.current = 0;
+    isPlayingRef.current = false;
+    lastWordRef.current = -1;
+    voiceRef.current = voice;
+    setState({ ...INITIAL });
+    audiosRef.current.forEach((a) => {
+      a.pause();
+      a.removeAttribute("src");
+    });
+    activeIdxRef.current = 0;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docId]);
+
+  // Unlock both audio elements on the first user gesture (mobile/iOS autoplay).
   const unlockedRef = useRef(false);
   useEffect(() => {
     const unlock = () => {
       if (unlockedRef.current) return;
       unlockedRef.current = true;
-      const audio = ensureAudio();
-      try {
-        audio.src = SILENT_WAV;
-        const p = audio.play();
-        if (p && typeof p.then === "function") {
-          p.then(() => {
-            audio.pause();
-            audio.currentTime = 0;
-          }).catch(() => {
-            /* ignore - element is still primed for later playback */
-          });
+      ensureAudios().forEach((a) => {
+        try {
+          a.src = SILENT_WAV;
+          const p = a.play();
+          if (p && typeof p.then === "function") {
+            p.then(() => {
+              a.pause();
+              a.currentTime = 0;
+              a.removeAttribute("src");
+            }).catch(() => {
+              /* still primed for later playback */
+            });
+          }
+        } catch {
+          /* ignore */
         }
-      } catch {
-        /* ignore */
-      }
+      });
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("touchend", unlock);
     };
@@ -125,55 +256,28 @@ export function usePlayer(docId: string | null, numChunks: number, voice?: strin
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("touchend", unlock);
     };
-  }, [ensureAudio]);
+  }, [ensureAudios]);
 
-  const loadChunk = useCallback(
-    async (index: number): Promise<LoadedChunk | null> => {
-      if (!docId || index < 0 || index >= numChunks) return null;
-      const cached = cacheRef.current.get(index);
-      if (cached) return cached;
-      const loaded = await fetchChunk(docId, index, voice);
-      cacheRef.current.set(index, loaded);
-      return loaded;
-    },
-    [docId, numChunks, voice],
-  );
-
-  const prefetchNext = useCallback(
-    (index: number) => {
-      const next = index + 1;
-      if (next < numChunks && !cacheRef.current.has(next)) {
-        loadChunk(next).catch(() => {
-          /* prefetch is best-effort */
-        });
-      }
-    },
-    [loadChunk, numChunks],
-  );
-
-  // Karaoke tracking loop while playing.
+  // Karaoke word-tracking loop (reads the active element + current chunk words).
   const tick = useCallback(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    const t = audio.currentTime;
-    const words = cacheRef.current.get(state.currentChunk)?.words ?? [];
+    const el = audiosRef.current[activeIdxRef.current];
+    if (!el) return;
+    const t = el.currentTime;
+    const words = cacheRef.current.get(currentChunkRef.current)?.words ?? [];
 
-    let active = lastWordRef.current;
-    if (active < 0 || active >= words.length || t < words[active].start || t >= words[active].end) {
-      active = words.findIndex((w) => t >= w.start && t < w.end);
-      if (active === -1) {
-        // Between words: keep last if before next, else the last passed word.
-        active = words.reduce((acc, w, i) => (t >= w.start ? i : acc), -1);
-      }
+    let act = lastWordRef.current;
+    if (act < 0 || act >= words.length || t < words[act].start || t >= words[act].end) {
+      act = words.findIndex((w) => t >= w.start && t < w.end);
+      if (act === -1) act = words.reduce((acc, w, i) => (t >= w.start ? i : acc), -1);
     }
 
     const now = performance.now();
     setState((s) => {
       const next = { ...s };
       let changed = false;
-      if (active !== lastWordRef.current) {
-        next.activeWord = active;
-        lastWordRef.current = active;
+      if (act !== lastWordRef.current) {
+        next.activeWord = act;
+        lastWordRef.current = act;
         changed = true;
       }
       if (now - lastTimePushRef.current > 80) {
@@ -185,170 +289,232 @@ export function usePlayer(docId: string | null, numChunks: number, voice?: strin
     });
 
     rafRef.current = requestAnimationFrame(tick);
-  }, [state.currentChunk]);
-
-  const startLoop = useCallback(() => {
-    if (rafRef.current == null) {
-      rafRef.current = requestAnimationFrame(tick);
-    }
-  }, [tick]);
-
-  const stopLoop = useCallback(() => {
-    if (rafRef.current != null) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
   }, []);
 
-  // Restart the loop when the tick callback identity changes (chunk switch).
   useEffect(() => {
     if (state.isPlaying) {
-      stopLoop();
-      startLoop();
+      if (rafRef.current == null) rafRef.current = requestAnimationFrame(tick);
     }
-    return stopLoop;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      if (rafRef.current != null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
   }, [state.isPlaying, tick]);
 
+  // Start (or jump to) a chunk on the active element. Used for initial play,
+  // explicit chunk navigation, and word jumps. Interrupts current playback.
   const goToChunk = useCallback(
     async (index: number, seekTime = 0, autoplay = true) => {
-      if (!docId || index < 0 || index >= numChunks) return;
+      if (!docIdRef.current || index < 0 || index >= numChunksRef.current) return;
+      const gen = ++genRef.current;
+      ensureAudios();
       setState((s) => ({ ...s, loading: true, error: null }));
       try {
-        const chunk = await loadChunk(index);
-        if (!chunk) return;
-        const audio = ensureAudio();
-        audio.src = chunk.audioUrl;
-        audio.playbackRate = state.rate;
-        lastWordRef.current = -1;
-
+        const data = await fetchData(index);
+        if (!data || gen !== genRef.current) {
+          setState((s) => ({ ...s, loading: false }));
+          return;
+        }
+        const el = active();
+        el.src = data.audioUrl;
+        el.playbackRate = rateRef.current;
         await new Promise<void>((resolve) => {
           const onReady = () => {
-            audio.removeEventListener("loadedmetadata", onReady);
+            el.removeEventListener("loadedmetadata", onReady);
             resolve();
           };
-          audio.addEventListener("loadedmetadata", onReady);
-          audio.load();
+          el.addEventListener("loadedmetadata", onReady);
+          el.load();
         });
+        if (gen !== genRef.current) return;
 
-        audio.currentTime = Math.min(seekTime, Math.max(0, chunk.duration - 0.05));
+        el.currentTime = Math.min(seekTime, Math.max(0, data.duration - 0.05));
+        preloadIdxRef.current = -1;
+        currentChunkRef.current = index;
+        lastWordRef.current = -1;
         setState((s) => ({
           ...s,
           currentChunk: index,
-          duration: chunk.duration,
-          currentTime: audio.currentTime,
+          duration: data.duration,
+          currentTime: el.currentTime,
           activeWord: -1,
           loading: false,
         }));
-        prefetchNext(index);
         if (autoplay) {
-          await audio.play();
-          setState((s) => ({ ...s, isPlaying: true }));
+          try {
+            await el.play();
+            isPlayingRef.current = true;
+            setState((s) => ({ ...s, isPlaying: true }));
+          } catch {
+            /* interrupted play() is non-fatal */
+          }
         }
+        preloadNextRef.current();
       } catch (err) {
         setState((s) => ({
           ...s,
           loading: false,
-          isPlaying: false,
           error: err instanceof Error ? err.message : "Playback failed",
         }));
       }
     },
-    [docId, numChunks, loadChunk, ensureAudio, prefetchNext, state.rate],
+    [ensureAudios, fetchData],
   );
 
-  // When the voice changes mid-document, drop cached (old-voice) audio and
-  // re-synthesize the current chunk at the same position + play state.
+  // Seamless voice switch: keep the current chunk playing in the old voice while
+  // the new voice is synthesized, then swap in at the same position. Upcoming
+  // chunks are re-buffered in the new voice.
   const prevVoiceRef = useRef<string | undefined>(voice);
   useEffect(() => {
     if (prevVoiceRef.current === voice) return;
     prevVoiceRef.current = voice;
-    if (!docId) return;
-    const audio = audioRef.current;
-    const resumeAt = audio?.currentTime ?? 0;
-    const wasPlaying = state.isPlaying;
-    cacheRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
-    cacheRef.current = new Map();
-    lastWordRef.current = -1;
-    void goToChunk(state.currentChunk, resumeAt, wasPlaying);
+    voiceRef.current = voice;
+    if (!docIdRef.current) return;
+
+    const gen = ++genRef.current;
+    const curIdx = currentChunkRef.current;
+    const wasPlaying = isPlayingRef.current;
+    setState((s) => ({ ...s, voiceLoading: true }));
+
+    (async () => {
+      let data: LoadedChunk;
+      try {
+        data = await fetchChunk(docIdRef.current as string, curIdx, voice);
+      } catch {
+        setState((s) => ({ ...s, voiceLoading: false }));
+        return;
+      }
+      if (gen !== genRef.current) {
+        URL.revokeObjectURL(data.audioUrl);
+        return;
+      }
+      const incoming = idle();
+      incoming.src = data.audioUrl;
+      incoming.playbackRate = rateRef.current;
+      await new Promise<void>((resolve) => {
+        const onReady = () => {
+          incoming.removeEventListener("loadedmetadata", onReady);
+          resolve();
+        };
+        incoming.addEventListener("loadedmetadata", onReady);
+        incoming.load();
+      });
+      if (gen !== genRef.current) {
+        URL.revokeObjectURL(data.audioUrl);
+        return;
+      }
+
+      // Resume from where the old voice has reached *now* for continuity.
+      const old = active();
+      const at = Math.min(old.currentTime || 0, Math.max(0, data.duration - 0.05));
+      try {
+        incoming.currentTime = at;
+      } catch {
+        /* ignore */
+      }
+      if (wasPlaying) {
+        try {
+          await incoming.play();
+          isPlayingRef.current = true;
+        } catch {
+          /* non-fatal */
+        }
+      }
+      old.pause();
+      activeIdxRef.current = 1 - activeIdxRef.current;
+      preloadIdxRef.current = -1;
+      lastWordRef.current = -1;
+
+      // Drop old-voice cache, keep the freshly synthesized current chunk.
+      cacheRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
+      cacheRef.current = new Map();
+      cacheRef.current.set(curIdx, data);
+
+      setState((s) => ({
+        ...s,
+        duration: data.duration,
+        currentTime: at,
+        activeWord: -1,
+        voiceLoading: false,
+      }));
+      preloadNextRef.current();
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voice, docId]);
 
-  // Wire the audio "ended" handler to auto-advance.
-  useEffect(() => {
-    const audio = ensureAudio();
-    const onEnded = () => {
-      const next = state.currentChunk + 1;
-      if (next < numChunks) {
-        goToChunk(next, 0, true);
-      } else {
-        setState((s) => ({ ...s, isPlaying: false, activeWord: -1 }));
-      }
-    };
-    audio.addEventListener("ended", onEnded);
-    return () => audio.removeEventListener("ended", onEnded);
-  }, [ensureAudio, state.currentChunk, numChunks, goToChunk]);
-
   const play = useCallback(async () => {
-    const audio = ensureAudio();
-    if (!audio.src) {
-      await goToChunk(state.currentChunk, 0, true);
+    ensureAudios();
+    const el = active();
+    if (!el.src || el.src === SILENT_WAV) {
+      await goToChunk(currentChunkRef.current, 0, true);
       return;
     }
-    await audio.play();
-    setState((s) => ({ ...s, isPlaying: true }));
-  }, [ensureAudio, goToChunk, state.currentChunk]);
+    try {
+      await el.play();
+      isPlayingRef.current = true;
+      setState((s) => ({ ...s, isPlaying: true }));
+    } catch {
+      /* non-fatal */
+    }
+  }, [ensureAudios, goToChunk]);
 
   const pause = useCallback(() => {
-    audioRef.current?.pause();
+    active()?.pause();
+    isPlayingRef.current = false;
     setState((s) => ({ ...s, isPlaying: false }));
   }, []);
 
   const toggle = useCallback(() => {
-    if (state.isPlaying) pause();
+    if (isPlayingRef.current) pause();
     else void play();
-  }, [state.isPlaying, play, pause]);
+  }, [play, pause]);
 
   const seek = useCallback((time: number) => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    audio.currentTime = Math.max(0, Math.min(time, audio.duration || time));
-    setState((s) => ({ ...s, currentTime: audio.currentTime }));
+    const el = active();
+    if (!el) return;
+    el.currentTime = Math.max(0, Math.min(time, el.duration || time));
+    setState((s) => ({ ...s, currentTime: el.currentTime }));
   }, []);
 
   const skip = useCallback(
     (delta: number) => {
-      const audio = audioRef.current;
-      if (!audio) return;
-      const target = audio.currentTime + delta;
-      if (target < 0 && state.currentChunk > 0) {
-        void goToChunk(state.currentChunk - 1, 9999, state.isPlaying);
-      } else if (target > (audio.duration || state.duration) && state.currentChunk < numChunks - 1) {
-        void goToChunk(state.currentChunk + 1, 0, state.isPlaying);
+      const el = active();
+      if (!el) return;
+      const target = el.currentTime + delta;
+      const dur = el.duration || state.duration;
+      if (target < 0 && currentChunkRef.current > 0) {
+        void goToChunk(currentChunkRef.current - 1, 9999, isPlayingRef.current);
+      } else if (target > dur && currentChunkRef.current < numChunksRef.current - 1) {
+        void goToChunk(currentChunkRef.current + 1, 0, isPlayingRef.current);
       } else {
         seek(target);
       }
     },
-    [goToChunk, seek, state.currentChunk, state.duration, state.isPlaying, numChunks],
+    [goToChunk, seek, state.duration],
   );
 
   const setRate = useCallback((rate: number) => {
-    if (audioRef.current) audioRef.current.playbackRate = rate;
+    rateRef.current = rate;
+    audiosRef.current.forEach((a) => {
+      a.playbackRate = rate;
+    });
     setState((s) => ({ ...s, rate }));
   }, []);
 
   const jumpToWord = useCallback(
     async (chunkIndex: number, wordIndex: number) => {
-      const chunk = await loadChunk(chunkIndex);
+      const chunk = await fetchData(chunkIndex);
       const start = chunk?.words[wordIndex]?.start ?? 0;
-      if (chunkIndex === state.currentChunk && audioRef.current?.src) {
+      if (chunkIndex === currentChunkRef.current && active()?.src) {
         seek(start);
-        if (!state.isPlaying) void play();
+        if (!isPlayingRef.current) void play();
       } else {
         void goToChunk(chunkIndex, start, true);
       }
     },
-    [loadChunk, state.currentChunk, state.isPlaying, seek, play, goToChunk],
+    [fetchData, seek, play, goToChunk],
   );
 
   return {
