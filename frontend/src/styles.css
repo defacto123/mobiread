@@ -170,7 +170,6 @@ body {
 .reader__word--active {
   background: var(--highlight-bg);
   color: var(--highlight);
-  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 /* Player / controls */
