@@ -33,9 +33,20 @@ jobs:
       # --- Backend: build, push, deploy (self-hosted Kokoro, CPU) ---
       - name: Build backend image
         run: |
-          gcloud builds submit ./backend \
-            --tag "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/backend:${GITHUB_SHA::7}" \
-            --logging=CLOUD_LOGGING_ONLY
+          cat > /tmp/backend-build.yaml <<EOF
+          steps:
+            - name: gcr.io/cloud-builders/docker
+              args:
+                - build
+                - -t
+                - ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/backend:${GITHUB_SHA::7}
+                - .
+          images:
+            - ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/backend:${GITHUB_SHA::7}
+          options:
+            logging: CLOUD_LOGGING_ONLY
+          EOF
+          gcloud builds submit ./backend --config=/tmp/backend-build.yaml
 
       - name: Deploy backend
         run: |
