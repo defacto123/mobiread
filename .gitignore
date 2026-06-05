@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+dist-tsnode/
+.vite/
+*.local
+*.tsbuildinfo
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime
+*.log
+/tmp/
+backend/tmp/
+
+# Models cache (WhisperX / torch) and self-hosted Kokoro weights
+.cache/
+*.pt
+*.onnx
+backend/models/
+models/

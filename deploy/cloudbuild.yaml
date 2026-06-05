@@ -1,0 +1,99 @@
+# Cloud Build pipeline for MobiRead.
+#
+# Builds and deploys both Cloud Run services (CPU-only, scale-to-zero).
+# Run via CI / `gcloud builds submit` - never deploy from the IDE.
+#
+# Required substitutions:
+#   _REGION        e.g. europe-west1
+#   _REPO          Artifact Registry repo name, e.g. mobiread
+#   _BACKEND_URL   backend service URL, baked into the frontend build
+#                  (deploy backend once, then set this for subsequent builds)
+#
+# DEEPINFRA_TOKEN must already exist in Secret Manager as secret "deepinfra-token".
+
+substitutions:
+  _REGION: europe-west1
+  _REPO: mobiread
+  _BACKEND_URL: ""
+
+steps:
+  # 1. Build + push backend
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA
+      - ./backend
+    id: build-backend
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA
+    id: push-backend
+    waitFor: [build-backend]
+
+  # 2. Deploy backend (CPU-only, scale-to-zero, secret injected)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - mobiread-backend
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --cpu=2
+      - --memory=4Gi
+      - --min-instances=0
+      - --max-instances=10
+      - --concurrency=4
+      - --timeout=300
+      - --set-env-vars=TTS_ENGINE=deepinfra_kokoro,TTS_VOICE=af_bella,ALIGN_BACKEND=proportional,ENABLE_ALIGNMENT=true,CORS_ORIGINS=${_BACKEND_URL}
+      - --set-secrets=DEEPINFRA_TOKEN=deepinfra-token:latest
+    id: deploy-backend
+    waitFor: [push-backend]
+
+  # 3. Build + push frontend (API URL baked in)
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/frontend:$SHORT_SHA
+      - --build-arg
+      - VITE_API_BASE=${_BACKEND_URL}
+      - ./frontend
+    id: build-frontend
+    waitFor: [deploy-backend]
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/frontend:$SHORT_SHA
+    id: push-frontend
+    waitFor: [build-frontend]
+
+  # 4. Deploy frontend
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - mobiread-frontend
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/frontend:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --cpu=1
+      - --memory=512Mi
+      - --min-instances=0
+      - --max-instances=10
+    waitFor: [push-frontend]
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/frontend:$SHORT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
