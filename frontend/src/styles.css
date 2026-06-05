@@ -1,14 +1,17 @@
 :root {
-  --bg: #0f1220;
-  --bg-soft: #1a1f33;
-  --panel: #161a2b;
-  --text: #e8eaf2;
-  --muted: #9aa0b5;
-  --accent: #6c8cff;
-  --accent-soft: #2a3566;
-  --highlight: #ffd54a;
-  --highlight-bg: rgba(255, 213, 74, 0.18);
-  --border: #272d44;
+  --bg: #f7f7fd;
+  --bg-soft: #eef2fc;
+  --panel: #ffffff;
+  --text: #202020;
+  --heading: #243278;
+  --muted: #5b5b5b;
+  --accent: #038ff3;
+  --accent-hover: #226ecf;
+  --accent-soft: #def1ff;
+  --highlight: #226ecf;
+  --highlight-bg: #c8e8ff;
+  --border: #e4e9f3;
+  --shadow: 0 8px 30px rgba(36, 50, 120, 0.08);
   font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
 }
 
@@ -18,7 +21,7 @@
 
 body {
   margin: 0;
-  background: radial-gradient(1200px 600px at 50% -10%, #1c2350 0%, var(--bg) 60%);
+  background: radial-gradient(1200px 600px at 50% -10%, #eaf3ff 0%, var(--bg) 60%);
   color: var(--text);
 }
 
@@ -36,15 +39,23 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  padding: 16px 0 12px;
-  position: relative;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin: 0 -20px;
+  padding: 16px 20px 12px;
+  background: rgba(247, 247, 253, 0.85);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
 }
 
 .app__logo {
   margin: 0;
   font-size: 30px;
+  font-weight: 800;
   letter-spacing: -0.5px;
-  background: linear-gradient(90deg, #8aa3ff, #c7b6ff);
+  background: linear-gradient(90deg, #038ff3, #226ecf);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -77,6 +88,7 @@ body {
   text-align: center;
   cursor: pointer;
   background: var(--panel);
+  box-shadow: var(--shadow);
   transition: border-color 0.15s, background 0.15s, transform 0.1s;
 }
 
@@ -152,7 +164,7 @@ body {
 .reader__word--active {
   background: var(--highlight-bg);
   color: var(--highlight);
-  box-shadow: inset 0 -2px 0 var(--highlight);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 /* Player / controls */
@@ -161,9 +173,11 @@ body {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(15, 18, 32, 0.92);
+  background: rgba(255, 255, 255, 0.92);
+  -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   border-top: 1px solid var(--border);
+  box-shadow: 0 -8px 30px rgba(36, 50, 120, 0.08);
 }
 
 .controls {
@@ -214,6 +228,7 @@ body {
 
 .btn:hover:not(:disabled) {
   border-color: var(--accent);
+  color: var(--accent);
 }
 
 .btn:active:not(:disabled) {
@@ -228,9 +243,15 @@ body {
 .btn--primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #0c0f1c;
+  color: #ffffff;
   font-weight: 700;
   min-width: 92px;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #ffffff;
 }
 
 .btn--ghost {
@@ -281,7 +302,7 @@ body {
 }
 
 .error {
-  color: #ff8a8a;
+  color: #d32f2f;
   text-align: center;
   font-size: 14px;
   margin: 16px 0;
