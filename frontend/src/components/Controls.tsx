@@ -1,3 +1,5 @@
+import { VOICES } from "../voices";
+
 interface Props {
   isPlaying: boolean;
   loading: boolean;
@@ -6,11 +8,13 @@ interface Props {
   rate: number;
   currentChunk: number;
   numChunks: number;
+  voice: string;
   onToggle: () => void;
   onSkip: (delta: number) => void;
   onSeek: (time: number) => void;
   onRate: (rate: number) => void;
   onChunk: (index: number) => void;
+  onVoice: (voice: string) => void;
 }
 
 const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -31,11 +35,13 @@ export function Controls(props: Props) {
     rate,
     currentChunk,
     numChunks,
+    voice,
     onToggle,
     onSkip,
     onSeek,
     onRate,
     onChunk,
+    onVoice,
   } = props;
 
   return (
@@ -88,6 +94,17 @@ export function Controls(props: Props) {
             {RATES.map((r) => (
               <option key={r} value={r}>
                 {r}x
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="controls__rate">
+          <span>Voice</span>
+          <select value={voice} onChange={(e) => onVoice(e.target.value)}>
+            {VOICES.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.label}
               </option>
             ))}
           </select>

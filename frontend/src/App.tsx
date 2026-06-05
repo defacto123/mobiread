@@ -6,13 +6,15 @@ import { Reader } from "./components/Reader";
 import { Uploader } from "./components/Uploader";
 import type { UploadResponse } from "./types";
 import { usePlayer } from "./usePlayer";
+import { DEFAULT_VOICE } from "./voices";
 
 export default function App() {
   const [doc, setDoc] = useState<UploadResponse | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [voice, setVoice] = useState<string>(DEFAULT_VOICE);
 
-  const player = usePlayer(doc?.doc_id ?? null, doc?.num_chunks ?? 0);
+  const player = usePlayer(doc?.doc_id ?? null, doc?.num_chunks ?? 0, voice);
 
   const handleFile = useCallback(async (file: File) => {
     setUploading(true);
@@ -22,6 +24,23 @@ export default function App() {
       setDoc(result);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }, []);
+
+  const loadExample = useCallback(async () => {
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const resp = await fetch(`${import.meta.env.BASE_URL}example.pdf`);
+      if (!resp.ok) throw new Error("Could not load the example PDF.");
+      const blob = await resp.blob();
+      const file = new File([blob], "example.pdf", { type: "application/pdf" });
+      const result = await uploadPdf(file);
+      setDoc(result);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Failed to load example");
     } finally {
       setUploading(false);
     }
@@ -47,6 +66,18 @@ export default function App() {
       {!doc ? (
         <main className="app__main">
           <Uploader onFile={handleFile} busy={uploading} />
+          <div className="app__example">
+            <button
+              className="btn app__example-btn"
+              onClick={loadExample}
+              disabled={uploading}
+            >
+              {uploading ? "Loading..." : "Load example PDF"}
+            </button>
+            <span className="app__example-hint">
+              Try it instantly with a sample research paper.
+            </span>
+          </div>
           {uploadError && <p className="error">{uploadError}</p>}
         </main>
       ) : (
@@ -67,11 +98,13 @@ export default function App() {
               rate={player.rate}
               currentChunk={player.currentChunk}
               numChunks={doc.num_chunks}
+              voice={voice}
               onToggle={player.toggle}
               onSkip={player.skip}
               onSeek={player.seek}
               onRate={player.setRate}
               onChunk={(i) => player.goToChunk(i, 0, true)}
+              onVoice={setVoice}
             />
           </div>
         </main>
