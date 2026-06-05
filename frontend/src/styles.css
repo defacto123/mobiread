@@ -130,22 +130,28 @@ body {
 }
 
 .reader__chunk {
-  margin: 0 0 14px;
+  margin: 0 0 10px;
+  padding: 10px 14px;
   color: var(--muted);
   cursor: pointer;
-  transition: color 0.15s;
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  transition: color 0.15s, background 0.15s, border-color 0.15s, box-shadow 0.15s;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
 
 .reader__chunk:hover {
   color: var(--text);
+  background: var(--bg-soft);
 }
 
 .reader__chunk--active {
   color: var(--text);
   cursor: default;
+  background: var(--panel);
+  border-color: var(--border);
+  box-shadow: var(--shadow);
 }
 
 .reader__word {
