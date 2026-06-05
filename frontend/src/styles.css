@@ -123,6 +123,8 @@ body {
   cursor: pointer;
   transition: color 0.15s;
   border-radius: 8px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .reader__chunk:hover {
@@ -139,6 +141,8 @@ body {
   border-radius: 5px;
   padding: 1px 2px;
   transition: background 0.08s, color 0.08s;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .reader__word:hover {

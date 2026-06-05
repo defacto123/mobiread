@@ -57,7 +57,6 @@ export default function App() {
             currentChunk={player.currentChunk}
             activeWord={player.activeWord}
             onWordClick={player.jumpToWord}
-            onActivateChunk={(i) => player.goToChunk(i, 0, true)}
           />
           <div className="app__player">
             <Controls

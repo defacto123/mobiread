@@ -3,6 +3,40 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchChunk } from "./api";
 import type { LoadedChunk } from "./types";
 
+/** A tiny silent WAV used to "unlock" the audio element on the first user
+ * gesture so later programmatic playback works under mobile autoplay policies
+ * (notably iOS Safari), even when a tap is followed by an async chunk fetch. */
+function buildSilentWavDataUri(): string {
+  const sampleRate = 8000;
+  const numSamples = 800;
+  const blockAlign = 2;
+  const dataSize = numSamples * blockAlign;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, dataSize, true);
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return "data:audio/wav;base64," + btoa(binary);
+}
+
+const SILENT_WAV = buildSilentWavDataUri();
+
 interface PlayerState {
   currentChunk: number;
   isPlaying: boolean;
@@ -60,6 +94,38 @@ export function usePlayer(docId: string | null, numChunks: number, voice?: strin
     }
     return audioRef.current;
   }, []);
+
+  // Unlock audio playback on the first user gesture (mobile/iOS autoplay).
+  const unlockedRef = useRef(false);
+  useEffect(() => {
+    const unlock = () => {
+      if (unlockedRef.current) return;
+      unlockedRef.current = true;
+      const audio = ensureAudio();
+      try {
+        audio.src = SILENT_WAV;
+        const p = audio.play();
+        if (p && typeof p.then === "function") {
+          p.then(() => {
+            audio.pause();
+            audio.currentTime = 0;
+          }).catch(() => {
+            /* ignore - element is still primed for later playback */
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("touchend", unlock);
+    };
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("touchend", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("touchend", unlock);
+    };
+  }, [ensureAudio]);
 
   const loadChunk = useCallback(
     async (index: number): Promise<LoadedChunk | null> => {
