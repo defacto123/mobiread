@@ -17,8 +17,15 @@ _PAGE_NUMBER_RE = re.compile(r"^\s*(page\s+)?\d+(\s*/\s*\d+)?\s*$", re.IGNORECAS
 _HYPHEN_BREAK_RE = re.compile(r"(\w)-\n(\w)")
 _MULTISPACE_RE = re.compile(r"[ \t]+")
 _MULTINEWLINE_RE = re.compile(r"\n{2,}")
+# Leading list-bullet glyphs that should not be spoken.
+_BULLET_RE = re.compile(r"^[\u2022\u25AA\u25CF\u2023\u25E6\u2043\u2219\u00B7\u2027]\s*")
 # Split on sentence-ending punctuation followed by whitespace.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+# Fraction of page height treated as header/footer margin, and the max length a
+# margin block may have to be considered boilerplate (running head / page no.).
+_MARGIN_FRACTION = 0.08
+_MARGIN_BLOCK_MAX_CHARS = 80
 
 
 def extract_text(pdf_bytes: bytes) -> tuple[str, int]:
@@ -27,7 +34,7 @@ def extract_text(pdf_bytes: bytes) -> tuple[str, int]:
     try:
         pages: list[str] = []
         for page in doc:
-            raw = page.get_text("text")
+            raw = _page_text_in_reading_order(page)
             pages.append(_clean_page(raw))
         num_pages = doc.page_count
     finally:
@@ -35,6 +42,56 @@ def extract_text(pdf_bytes: bytes) -> tuple[str, int]:
 
     text = "\n".join(p for p in pages if p.strip())
     return _normalize(text), num_pages
+
+
+def _page_text_in_reading_order(page) -> str:
+    """Extract a page's text in human reading order.
+
+    PyMuPDF's plain `get_text("text")` follows the PDF content stream, which on
+    multi-column layouts interleaves columns and emits running headers/footers
+    out of place. Instead we work with positioned text blocks: drop short
+    header/footer blocks in the page margins, and on two-column pages read the
+    left column top-to-bottom, then the right column.
+    """
+    rect = page.rect
+    width, height = rect.width, rect.height
+    mid_x = rect.x0 + width / 2
+    top_band = rect.y0 + _MARGIN_FRACTION * height
+    bottom_band = rect.y1 - _MARGIN_FRACTION * height
+
+    blocks = [b for b in page.get_text("blocks") if b[6] == 0 and b[4].strip()]
+    if not blocks:
+        return ""
+
+    body: list = []
+    for b in blocks:
+        _x0, y0, _x1, y1, txt = b[0], b[1], b[2], b[3], b[4]
+        in_margin = y1 <= top_band or y0 >= bottom_band
+        # Only drop boilerplate-sized blocks in the margins; keep long body text
+        # that merely starts/ends near an edge.
+        if in_margin and len(txt.strip()) < _MARGIN_BLOCK_MAX_CHARS:
+            continue
+        body.append(b)
+    if not body:
+        body = blocks
+
+    gutter = 0.08 * width
+
+    def center(b) -> float:
+        return (b[0] + b[2]) / 2
+
+    left = [b for b in body if center(b) < mid_x - gutter]
+    right = [b for b in body if center(b) > mid_x + gutter]
+    spanning = [b for b in body if mid_x - gutter <= center(b) <= mid_x + gutter]
+
+    if len(left) >= 2 and len(right) >= 2:
+        # Two columns: full-width (spanning) blocks flow with the left column.
+        ordered = sorted(left + spanning, key=lambda b: b[1]) + sorted(right, key=lambda b: b[1])
+    else:
+        # Single column (or ambiguous): top-to-bottom, then left-to-right.
+        ordered = sorted(body, key=lambda b: (round(b[1]), b[0]))
+
+    return "\n".join(b[4].strip() for b in ordered)
 
 
 def _clean_page(raw: str) -> str:
@@ -47,6 +104,10 @@ def _clean_page(raw: str) -> str:
         stripped = line.strip()
         if not stripped:
             kept_lines.append("")
+            continue
+        # Strip a leading list-bullet glyph ("• item" -> "item").
+        stripped = _BULLET_RE.sub("", stripped).strip()
+        if not stripped:
             continue
         # Drop standalone page numbers / "Page 3 of 47" style lines.
         if _PAGE_NUMBER_RE.match(stripped):
