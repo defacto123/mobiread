@@ -16,6 +16,7 @@ the client that triggered it has already navigated away.
 from __future__ import annotations
 
 import threading
+import time
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -102,10 +103,27 @@ gate = PriorityGate(
 _inflight: dict[CacheKey, threading.Event] = {}
 _inflight_lock = threading.Lock()
 
+# Wall-clock time of the last foreground synthesis, so background work can keep
+# clear of an actively reading user rather than competing with them for CPU.
+_last_foreground = 0.0
+
+
+def note_foreground_activity() -> None:
+    global _last_foreground
+    _last_foreground = time.monotonic()
+
+
+def seconds_since_foreground() -> float:
+    return time.monotonic() - _last_foreground
+
 
 def _synthesize_now(text: str, voice: str, key: CacheKey, foreground: bool) -> CachedChunk:
+    if foreground:
+        note_foreground_activity()
     slot = gate.foreground() if foreground else gate.background()
     with slot:
+        if foreground:
+            note_foreground_activity()  # refresh after any wait for a slot
         # Another worker may have finished this chunk while we queued for a slot.
         cached = cache.get(key)
         if cached is not None:

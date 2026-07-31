@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import threading
 import wave
 
@@ -71,13 +72,87 @@ class LocalKokoroEngine(TTSEngine):
 
     def synthesize(self, text: str, voice: str | None = None) -> TTSResult:
         kokoro = self._ensure_model()
-        samples, sample_rate = kokoro.create(
-            text,
-            voice=voice or self._settings.tts_voice,
-            speed=1.0,
-            lang=self._settings.kokoro_lang,
-        )
-        return TTSResult(audio=_float_to_wav(samples, sample_rate), mime="audio/wav")
+        selected_voice = voice or self._settings.tts_voice
+
+        # kokoro-onnx truncates to 510 phonemes and then indexes the voice array
+        # at exactly that length, which raises IndexError - a chunk that trips it
+        # can never be synthesized. Its own splitter only breaks on punctuation,
+        # so an unpunctuated run still overflows. Phonemize up front and batch by
+        # phoneme budget: text length is a poor proxy, since digits and acronyms
+        # expand several-fold ("3.14159" is far longer spoken than written).
+        phonemes = kokoro.tokenizer.phonemize(text, self._settings.kokoro_lang)
+
+        rate: int | None = None
+        parts: list[np.ndarray] = []
+        for batch in _batch_phonemes(phonemes, self._settings.tts_max_phonemes):
+            samples, sample_rate = kokoro.create(
+                batch,
+                voice=selected_voice,
+                speed=1.0,
+                lang=self._settings.kokoro_lang,
+                is_phonemes=True,
+            )
+            rate = sample_rate
+            parts.append(np.asarray(samples, dtype=np.float32))
+
+        if not parts or rate is None:
+            raise RuntimeError("Kokoro produced no audio for this text.")
+
+        merged = parts[0] if len(parts) == 1 else np.concatenate(parts)
+        return TTSResult(audio=_float_to_wav(merged, rate), mime="audio/wav")
+
+
+# Split after clause-ending punctuation, keeping the mark with the phonemes it
+# follows so the model still hears the pause.
+_PHONEME_CLAUSE = re.compile(r"(?<=[.!?;:,])\s+")
+
+
+def _batch_phonemes(phonemes: str, budget: int) -> list[str]:
+    """Group a phoneme string into batches of at most `budget` phonemes.
+
+    Prefers clause boundaries, then word boundaries, and hard-cuts only an
+    unbroken run that is itself over budget."""
+    phonemes = phonemes.strip()
+    if not phonemes:
+        return []
+    if len(phonemes) <= budget:
+        return [phonemes]
+
+    batches: list[str] = []
+    current = ""
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            batches.append(current)
+            current = ""
+
+    def add(piece: str) -> None:
+        nonlocal current
+        if not current:
+            current = piece
+        elif len(current) + 1 + len(piece) <= budget:
+            current = f"{current} {piece}"
+        else:
+            flush()
+            current = piece
+
+    for clause in _PHONEME_CLAUSE.split(phonemes):
+        clause = clause.strip()
+        if not clause:
+            continue
+        if len(clause) <= budget:
+            add(clause)
+            continue
+        for word in clause.split():
+            if len(word) <= budget:
+                add(word)
+                continue
+            flush()
+            for start in range(0, len(word), budget):
+                batches.append(word[start : start + budget])
+    flush()
+    return batches
 
 
 def _cgroup_cpu_limit() -> int | None:
