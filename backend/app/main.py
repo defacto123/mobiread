@@ -3,7 +3,7 @@
 Endpoints:
 * GET  /health                     - liveness + active engine info
 * POST /upload                     - extract + clean + chunk a PDF
-* GET  /chunk/{doc_id}/{index}     - synthesize + align one chunk (audio + words)
+* POST /chunk/{doc_id}/{index}     - synthesize + align one chunk (audio + words)
 * POST /warm/{doc_id}              - start/retarget background pre-generation
 * GET  /warm-status/{doc_id}       - pre-generation progress
 """
@@ -21,9 +21,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.models import (
+    ChunkRequest,
     ChunkResponse,
     HealthResponse,
     UploadResponse,
+    WarmRequest,
     WarmStatusResponse,
 )
 from app.pdf import chunk_text, extract_text
@@ -117,19 +119,29 @@ def _require_doc(doc_id: str) -> Document:
     return doc
 
 
-@app.get("/chunk/{doc_id}/{index}", response_model=ChunkResponse)
+@app.post("/chunk/{doc_id}/{index}", response_model=ChunkResponse)
 async def get_chunk(
-    request: Request, doc_id: str, index: int, voice: str | None = None
+    request: Request, doc_id: str, index: int, body: ChunkRequest | None = None
 ) -> ChunkResponse:
-    doc = _require_doc(doc_id)
-    if index < 0 or index >= len(doc.chunks):
-        raise HTTPException(status_code=404, detail="Chunk index out of range.")
+    body = body or ChunkRequest()
+    doc = store.get(doc_id)
 
-    text = doc.chunks[index]
-    selected_voice = voice or settings.tts_voice
+    # Requests are spread across instances, so this one may not hold the
+    # document. The client carries the chunk's text for exactly that case.
+    if doc is not None:
+        if index < 0 or index >= len(doc.chunks):
+            raise HTTPException(status_code=404, detail="Chunk index out of range.")
+        text = doc.chunks[index]
+    elif body.text:
+        text = body.text
+    else:
+        raise HTTPException(status_code=404, detail="Document not found or expired.")
+
+    selected_voice = body.voice or settings.tts_voice
 
     # The reader is here, so aim background pre-generation at this position.
-    prewarm.ensure(doc, selected_voice, start_index=index)
+    if doc is not None:
+        prewarm.ensure(doc, selected_voice, start_index=index)
 
     # Abandoned requests (the client seeked elsewhere) shouldn't consume a
     # synthesis slot that a live request is waiting for.
@@ -156,11 +168,21 @@ async def get_chunk(
 
 
 @app.post("/warm/{doc_id}", response_model=WarmStatusResponse)
-def warm(doc_id: str, voice: str | None = None, start: int = 0) -> WarmStatusResponse:
-    """Start (or retarget) background pre-generation for a document."""
-    doc = _require_doc(doc_id)
-    selected_voice = voice or settings.tts_voice
-    prewarm.ensure(doc, selected_voice, start_index=start)
+def warm(doc_id: str, body: WarmRequest | None = None) -> WarmStatusResponse:
+    """Start (or retarget) background pre-generation for a document.
+
+    An instance that doesn't know this document adopts it from `chunks` when the
+    client supplies them, so pre-generation works wherever the request lands."""
+    body = body or WarmRequest()
+    doc = store.get(doc_id)
+    if doc is None:
+        if not body.chunks:
+            raise HTTPException(status_code=404, detail="Document not found or expired.")
+        doc = Document(doc_id=doc_id, chunks=body.chunks, num_pages=body.num_pages)
+        store.put(doc)
+
+    selected_voice = body.voice or settings.tts_voice
+    prewarm.ensure(doc, selected_voice, start_index=body.start)
     return _warm_status(doc, selected_voice)
 
 

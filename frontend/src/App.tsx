@@ -8,13 +8,15 @@ import type { UploadResponse } from "./types";
 import { usePlayer } from "./usePlayer";
 import { DEFAULT_VOICE } from "./voices";
 
+const NO_CHUNKS: string[] = [];
+
 export default function App() {
   const [doc, setDoc] = useState<UploadResponse | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [voice, setVoice] = useState<string>(DEFAULT_VOICE);
 
-  const player = usePlayer(doc?.doc_id ?? null, doc?.num_chunks ?? 0, voice);
+  const player = usePlayer(doc?.doc_id ?? null, doc?.chunks ?? NO_CHUNKS, voice);
 
   const handleFile = useCallback(async (file: File) => {
     setUploading(true);
