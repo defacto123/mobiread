@@ -4,6 +4,8 @@ Endpoints:
 * GET  /health                     - liveness + active engine info
 * POST /upload                     - extract + clean + chunk a PDF
 * GET  /chunk/{doc_id}/{index}     - synthesize + align one chunk (audio + words)
+* POST /warm/{doc_id}              - start/retarget background pre-generation
+* GET  /warm-status/{doc_id}       - pre-generation progress
 """
 
 from __future__ import annotations
@@ -13,15 +15,21 @@ import logging
 import threading
 import uuid
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.align import align_words
 from app.config import get_settings
-from app.models import ChunkResponse, HealthResponse, UploadResponse
+from app.models import (
+    ChunkResponse,
+    HealthResponse,
+    UploadResponse,
+    WarmStatusResponse,
+)
 from app.pdf import chunk_text, extract_text
+from app.prewarm import prewarm
 from app.store import Document, store
-from app.tts import TTSEngine, get_engine
+from app.synth import get_or_synthesize, get_tts_engine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mobiread")
@@ -38,18 +46,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_engine: TTSEngine | None = None
-
-
-def _get_engine() -> TTSEngine:
-    """Lazily build the TTS engine so the app can boot for health checks
-    even before secrets are wired."""
-    global _engine
-    if _engine is None:
-        _engine = get_engine(settings)
-    return _engine
-
-
 @app.on_event("startup")
 def _warm_engine() -> None:
     """Eagerly build the engine and run a tiny synthesis so the (kept-warm)
@@ -59,7 +55,7 @@ def _warm_engine() -> None:
 
     def _load() -> None:
         try:
-            _get_engine().synthesize("Warm up.", voice=settings.tts_voice)
+            get_tts_engine().synthesize("Warm up.", voice=settings.tts_voice)
             logger.info("TTS engine warmed up")
         except Exception:
             logger.exception("TTS engine warm-up failed (will lazy-load on demand)")
@@ -114,30 +110,73 @@ def upload(file: UploadFile = File(...)) -> UploadResponse:
     )
 
 
-@app.get("/chunk/{doc_id}/{index}", response_model=ChunkResponse)
-def get_chunk(doc_id: str, index: int, voice: str | None = None) -> ChunkResponse:
+def _require_doc(doc_id: str) -> Document:
     doc = store.get(doc_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found or expired.")
+    return doc
+
+
+@app.get("/chunk/{doc_id}/{index}", response_model=ChunkResponse)
+async def get_chunk(
+    request: Request, doc_id: str, index: int, voice: str | None = None
+) -> ChunkResponse:
+    doc = _require_doc(doc_id)
     if index < 0 or index >= len(doc.chunks):
         raise HTTPException(status_code=404, detail="Chunk index out of range.")
 
     text = doc.chunks[index]
+    selected_voice = voice or settings.tts_voice
+
+    # The reader is here, so aim background pre-generation at this position.
+    prewarm.ensure(doc, selected_voice, start_index=index)
+
+    # Abandoned requests (the client seeked elsewhere) shouldn't consume a
+    # synthesis slot that a live request is waiting for.
+    if await request.is_disconnected():
+        raise HTTPException(status_code=499, detail="Client disconnected.")
 
     try:
-        result = _get_engine().synthesize(text, voice=voice)
+        chunk = await run_in_threadpool(
+            get_or_synthesize, doc_id, index, text, selected_voice, True
+        )
     except Exception as exc:
         logger.exception("TTS synthesis failed")
         raise HTTPException(status_code=502, detail=f"TTS failed: {exc}")
-
-    duration, words = align_words(result.audio, text, settings)
 
     return ChunkResponse(
         doc_id=doc_id,
         index=index,
         text=text,
-        audio_b64=base64.b64encode(result.audio).decode("ascii"),
-        audio_mime=result.mime,
-        duration=duration,
-        words=words,
+        audio_b64=base64.b64encode(chunk.audio).decode("ascii"),
+        audio_mime=chunk.mime,
+        duration=chunk.duration,
+        words=chunk.words,
+    )
+
+
+@app.post("/warm/{doc_id}", response_model=WarmStatusResponse)
+def warm(doc_id: str, voice: str | None = None, start: int = 0) -> WarmStatusResponse:
+    """Start (or retarget) background pre-generation for a document."""
+    doc = _require_doc(doc_id)
+    selected_voice = voice or settings.tts_voice
+    prewarm.ensure(doc, selected_voice, start_index=start)
+    return _warm_status(doc, selected_voice)
+
+
+@app.get("/warm-status/{doc_id}", response_model=WarmStatusResponse)
+def warm_status(doc_id: str, voice: str | None = None) -> WarmStatusResponse:
+    doc = _require_doc(doc_id)
+    return _warm_status(doc, voice or settings.tts_voice)
+
+
+def _warm_status(doc: Document, voice: str) -> WarmStatusResponse:
+    ready, total = prewarm.status(doc, voice)
+    return WarmStatusResponse(
+        doc_id=doc.doc_id,
+        voice=voice,
+        ready=ready,
+        total=total,
+        num_chunks=len(doc.chunks),
+        full_document=len(doc.chunks) <= settings.prewarm_full_max_chunks,
     )

@@ -1,4 +1,4 @@
-import type { ChunkResponse, LoadedChunk, UploadResponse } from "./types";
+import type { ChunkResponse, LoadedChunk, UploadResponse, WarmStatus } from "./types";
 
 const API_BASE =
   (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8000";
@@ -20,22 +20,42 @@ export async function fetchChunk(
   docId: string,
   index: number,
   voice?: string,
+  signal?: AbortSignal,
 ): Promise<LoadedChunk> {
   const url = new URL(`${API_BASE}/chunk/${docId}/${index}`);
   if (voice) url.searchParams.set("voice", voice);
 
-  const resp = await fetch(url.toString());
+  const resp = await fetch(url.toString(), { signal });
   if (!resp.ok) {
     throw new Error(await readError(resp));
   }
   const data: ChunkResponse = await resp.json();
-  const audioUrl = base64ToObjectUrl(data.audio_b64, data.audio_mime);
   return {
     index: data.index,
-    audioUrl,
+    bytes: base64ToArrayBuffer(data.audio_b64),
+    audioBuffer: null,
     duration: data.duration,
     words: data.words,
   };
+}
+
+/** Ask the backend to pre-generate audio around `start`. Best-effort: the UI
+ * works without it, just with more on-demand synthesis. */
+export async function warmDoc(
+  docId: string,
+  voice: string | undefined,
+  start: number,
+): Promise<WarmStatus | null> {
+  const url = new URL(`${API_BASE}/warm/${docId}`);
+  if (voice) url.searchParams.set("voice", voice);
+  url.searchParams.set("start", String(start));
+  try {
+    const resp = await fetch(url.toString(), { method: "POST" });
+    if (!resp.ok) return null;
+    return (await resp.json()) as WarmStatus;
+  } catch {
+    return null;
+  }
 }
 
 async function readError(resp: Response): Promise<string> {
@@ -47,12 +67,11 @@ async function readError(resp: Response): Promise<string> {
   }
 }
 
-function base64ToObjectUrl(b64: string, mime: string): string {
+function base64ToArrayBuffer(b64: string): ArrayBuffer {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
     bytes[i] = binary.charCodeAt(i);
   }
-  const blob = new Blob([bytes], { type: mime || "audio/wav" });
-  return URL.createObjectURL(blob);
+  return bytes.buffer;
 }

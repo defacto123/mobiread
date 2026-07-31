@@ -82,7 +82,7 @@ gcloud run deploy mobiread-backend \
   --region="$REGION" --allow-unauthenticated \
   --cpu=4 --memory=4Gi --min-instances=0 --max-instances=10 \
   --concurrency=1 --timeout=600 \
-  --set-env-vars=TTS_ENGINE=local_kokoro,TTS_VOICE=af_bella,KOKORO_LANG=en-us,ALIGN_BACKEND=proportional,ENABLE_ALIGNMENT=true
+  --set-env-vars=TTS_ENGINE=local_kokoro,TTS_VOICE=bf_emma,KOKORO_LANG=en-us,ALIGN_BACKEND=proportional,ENABLE_ALIGNMENT=true
 
 BACKEND_URL=$(gcloud run services describe mobiread-backend \
   --region="$REGION" --format='value(status.url)')
