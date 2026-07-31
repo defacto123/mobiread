@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 
 from app.config import get_settings
 from app.store import Document
-from app.synth import get_or_synthesize, is_cached
+from app.synth import get_or_synthesize, is_cached, seconds_since_foreground
 
 logger = logging.getLogger("mobiread.prewarm")
 settings = get_settings()
@@ -52,9 +53,12 @@ class PrewarmManager:
             return
         key: WorkerKey = (doc.doc_id, voice)
         with self._lock:
-            # A voice switch makes any other voice's pending work useless.
-            for (other_doc, other_voice), state in self._workers.items():
-                if other_doc == doc.doc_id and other_voice != voice:
+            # Only one synthesis runs at a time, so any worker other than this
+            # one is spending the sole CPU slot on audio nobody is waiting for:
+            # a voice the reader switched away from, or a document they left.
+            # Park them all; `ensure` revives a worker if the reader returns.
+            for other_key, state in self._workers.items():
+                if other_key != key:
                     state.cancelled = True
 
             state = self._workers.get(key)
@@ -97,6 +101,25 @@ class PrewarmManager:
         end = min(total, start + settings.prewarm_window_chunks)
         return list(range(start, end))
 
+    @staticmethod
+    def _await_quiet(state: WorkerState, revision: int) -> bool:
+        """Hold off while the reader is actively requesting audio.
+
+        Synthesis runs one at a time, so starting a background chunk just as a
+        user request arrives would make them wait out its full duration.
+        Returns False if the work became stale while waiting."""
+        quiet = settings.prewarm_quiet_seconds
+        while True:
+            if state.cancelled:
+                return False
+            with state._lock:
+                if state.revision != revision:
+                    return False  # reader moved: this chunk may no longer matter
+            idle = seconds_since_foreground()
+            if idle >= quiet:
+                return True
+            time.sleep(min(quiet - idle, quiet))
+
     def _run(self, key: WorkerKey, state: WorkerState) -> None:
         while True:
             with state._lock:
@@ -114,6 +137,8 @@ class PrewarmManager:
                         break  # reader moved: recompute the target list
                 if is_cached(state.doc.doc_id, index, state.voice):
                     continue
+                if not self._await_quiet(state, revision):
+                    break
                 try:
                     get_or_synthesize(
                         state.doc.doc_id,

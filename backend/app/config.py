@@ -36,14 +36,22 @@ class Settings(BaseSettings):
     align_backend: str = "proportional"
     align_language: str = "en"
 
-    # Chunking
-    chunk_target_chars: int = 400
+    # Chunking. Kept well under Kokoro's 510-phoneme ceiling, and small enough
+    # that an on-demand synthesis (a seek to a cold spot) returns quickly.
+    chunk_target_chars: int = 240
+    # Phonemes per synthesis call. Kokoro's context is 510 and it indexes the
+    # voice array by token count, so 510 itself is out of bounds; stay clear of
+    # the edge and let longer text be batched and rejoined.
+    tts_max_phonemes: int = 480
 
-    # Synthesis concurrency. Kokoro on CPU saturates the cores quickly, so total
-    # parallelism is capped and background pre-warming is kept below it, leaving
-    # a slot free for user-initiated (foreground) requests.
-    synth_max_concurrency: int = 2
+    # Synthesis concurrency. One at a time: Kokoro sizes its thread pool to the
+    # whole CPU allocation, so running two at once just oversubscribes the cores
+    # and makes both slower.
+    synth_max_concurrency: int = 1
     synth_max_background: int = 1
+    # Background pre-generation stays out of the way for this long after a
+    # user-facing request, so playback isn't competing with it for CPU.
+    prewarm_quiet_seconds: float = 1.5
 
     # Cache of synthesized audio (uncompressed WAV, ~48 KB per second of audio).
     audio_cache_mb: int = 600

@@ -49,9 +49,10 @@ jobs:
           gcloud builds submit ./backend --config=/tmp/backend-build.yaml
 
       - name: Deploy backend
-        # Concurrency stays above 1 so one instance can serve a client's upload,
-        # warm and chunk requests together; the app caps real CPU parallelism
-        # itself (SYNTH_MAX_CONCURRENCY). Session affinity keeps a client on the
+        # Concurrency is high so surplus requests queue inside the container
+        # instead of being rejected with 429 (which they were, since only one
+        # instance is allowed). Real CPU parallelism is capped by the app itself
+        # (SYNTH_MAX_CONCURRENCY). Session affinity keeps a client on the
         # instance holding its document + warmed audio cache.
         #
         # Scales to zero: an always-warm instance costs ~$51/month to avoid a
@@ -70,7 +71,7 @@ jobs:
             --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/backend:${GITHUB_SHA::7}" \
             --region="$REGION" --platform=managed --allow-unauthenticated \
             --cpu=4 --memory=4Gi --min-instances=0 --max-instances=1 \
-            --concurrency=8 --timeout=600 --session-affinity --cpu-boost \
+            --concurrency=80 --timeout=600 --session-affinity --cpu-boost \
             --no-cpu-throttling \
             --set-env-vars='^|^TTS_ENGINE=local_kokoro|TTS_VOICE=bf_emma|KOKORO_LANG=en-us|ALIGN_BACKEND=proportional|ENABLE_ALIGNMENT=true|CORS_ORIGIN_REGEX=https://mobiread-frontend-.*\.run\.app'
 
