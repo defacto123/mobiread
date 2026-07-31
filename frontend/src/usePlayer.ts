@@ -5,11 +5,13 @@ import { fetchChunk, warmDoc } from "./api";
 import type { LoadedChunk, WordTiming } from "./types";
 
 /** How many chunks ahead of the reader to download. The backend pre-generates a
- * wider range; this is just the local copy so playback never waits on network. */
-const PREFETCH_AHEAD = 6;
-/** Max simultaneous prefetch downloads. Kept low so a user-initiated request is
+ * wider range; this is just the local copy so playback never waits on network.
+ * Kept small: each chunk is ~1 MB, and a burst of parallel requests pushes
+ * Cloud Run to add instances, which defeats the server-side cache. */
+const PREFETCH_AHEAD = 3;
+/** Max simultaneous prefetch downloads. One, so a user-initiated request is
  * never stuck behind them in the browser's per-host connection pool. */
-const MAX_PARALLEL_PREFETCH = 2;
+const MAX_PARALLEL_PREFETCH = 1;
 /** Caps on client memory: encoded audio bytes, and decoded (much larger) PCM. */
 const MAX_CACHE_BYTES = 120 * 1024 * 1024;
 const MAX_DECODED_CHUNKS = 12;
