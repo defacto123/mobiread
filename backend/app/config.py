@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # TTS engine selection + default voice
     # Engines: "local_kokoro" (self-hosted ONNX), "deepinfra_kokoro" (managed), "mock"
     tts_engine: str = "local_kokoro"
-    tts_voice: str = "af_bella"
+    tts_voice: str = "bf_emma"
     tts_model: str = "hexgrad/Kokoro-82M"
 
     # Self-hosted Kokoro (ONNX) model files. Baked into the image at /models.
@@ -34,6 +34,22 @@ class Settings(BaseSettings):
 
     # Chunking
     chunk_target_chars: int = 400
+
+    # Synthesis concurrency. Kokoro on CPU saturates the cores quickly, so total
+    # parallelism is capped and background pre-warming is kept below it, leaving
+    # a slot free for user-initiated (foreground) requests.
+    synth_max_concurrency: int = 2
+    synth_max_background: int = 1
+
+    # Cache of synthesized audio (uncompressed WAV, ~48 KB per second of audio).
+    audio_cache_mb: int = 600
+
+    # Background pre-generation. Documents at or below `prewarm_full_max_chunks`
+    # are generated in full; longer ones only keep `prewarm_window_chunks`
+    # generated ahead of the reader.
+    prewarm_enabled: bool = True
+    prewarm_full_max_chunks: int = 120
+    prewarm_window_chunks: int = 24
 
     # CORS
     cors_origins: str = "http://localhost:5173"

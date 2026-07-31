@@ -38,7 +38,7 @@ COPY app ./app
 # Defaults: self-hosted Kokoro on CPU.
 ENV PORT=8080 \
     TTS_ENGINE=local_kokoro \
-    TTS_VOICE=af_bella \
+    TTS_VOICE=bf_emma \
     KOKORO_MODEL_PATH=/models/kokoro-v1.0.onnx \
     KOKORO_VOICES_PATH=/models/voices-v1.0.bin \
     KOKORO_LANG=en-us \

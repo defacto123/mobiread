@@ -50,7 +50,7 @@ steps:
       - --max-instances=10
       - --concurrency=4
       - --timeout=300
-      - --set-env-vars=TTS_ENGINE=deepinfra_kokoro,TTS_VOICE=af_bella,ALIGN_BACKEND=proportional,ENABLE_ALIGNMENT=true,CORS_ORIGINS=${_BACKEND_URL}
+      - --set-env-vars=TTS_ENGINE=deepinfra_kokoro,TTS_VOICE=bf_emma,ALIGN_BACKEND=proportional,ENABLE_ALIGNMENT=true,CORS_ORIGINS=${_BACKEND_URL}
       - --set-secrets=DEEPINFRA_TOKEN=deepinfra-token:latest
     id: deploy-backend
     waitFor: [push-backend]

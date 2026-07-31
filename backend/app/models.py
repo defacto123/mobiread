@@ -24,6 +24,15 @@ class ChunkResponse(BaseModel):
     words: list[WordTiming]
 
 
+class WarmStatusResponse(BaseModel):
+    doc_id: str
+    voice: str
+    ready: int
+    total: int
+    num_chunks: int
+    full_document: bool
+
+
 class HealthResponse(BaseModel):
     status: str
     tts_engine: str

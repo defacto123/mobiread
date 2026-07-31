@@ -87,7 +87,7 @@ npm run dev                     # http://localhost:5173
 | Var | Default | Purpose |
 |---|---|---|
 | `TTS_ENGINE` | `local_kokoro` | `local_kokoro` \| `deepinfra_kokoro` \| `mock` |
-| `TTS_VOICE` | `af_bella` | Default Kokoro voice |
+| `TTS_VOICE` | `bf_emma` | Default Kokoro voice |
 | `KOKORO_MODEL_PATH` | `/models/kokoro-v1.0.onnx` | Self-hosted ONNX model path |
 | `KOKORO_VOICES_PATH` | `/models/voices-v1.0.bin` | Self-hosted voices path |
 | `KOKORO_LANG` | `en-us` | Phonemization language |
