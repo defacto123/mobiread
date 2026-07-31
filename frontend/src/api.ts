@@ -16,16 +16,24 @@ export async function uploadPdf(file: File): Promise<UploadResponse> {
   return resp.json();
 }
 
+/** Fetch one chunk's audio + word timings.
+ *
+ * `text` is sent along so an instance that never received the upload can still
+ * serve the request - Cloud Run spreads requests across instances, and the
+ * document lives in the memory of whichever one handled the upload. */
 export async function fetchChunk(
   docId: string,
   index: number,
   voice?: string,
   signal?: AbortSignal,
+  text?: string,
 ): Promise<LoadedChunk> {
-  const url = new URL(`${API_BASE}/chunk/${docId}/${index}`);
-  if (voice) url.searchParams.set("voice", voice);
-
-  const resp = await fetch(url.toString(), { signal });
+  const resp = await fetch(`${API_BASE}/chunk/${docId}/${index}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ voice, text }),
+    signal,
+  });
   if (!resp.ok) {
     throw new Error(await readError(resp));
   }
@@ -40,17 +48,28 @@ export async function fetchChunk(
 }
 
 /** Ask the backend to pre-generate audio around `start`. Best-effort: the UI
- * works without it, just with more on-demand synthesis. */
+ * works without it, just with more on-demand synthesis.
+ *
+ * The chunk list is only re-sent when the instance answering says it doesn't
+ * know the document, keeping the common call small even for a long book. */
 export async function warmDoc(
   docId: string,
   voice: string | undefined,
   start: number,
+  chunks?: string[],
 ): Promise<WarmStatus | null> {
-  const url = new URL(`${API_BASE}/warm/${docId}`);
-  if (voice) url.searchParams.set("voice", voice);
-  url.searchParams.set("start", String(start));
+  const post = (body: Record<string, unknown>) =>
+    fetch(`${API_BASE}/warm/${docId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
   try {
-    const resp = await fetch(url.toString(), { method: "POST" });
+    let resp = await post({ voice, start });
+    if (resp.status === 404 && chunks?.length) {
+      resp = await post({ voice, start, chunks });
+    }
     if (!resp.ok) return null;
     return (await resp.json()) as WarmStatus;
   } catch {

@@ -49,12 +49,16 @@ jobs:
           gcloud builds submit ./backend --config=/tmp/backend-build.yaml
 
       - name: Deploy backend
+        # Concurrency stays above 1 so one instance can serve a client's upload,
+        # warm and chunk requests together; the app caps real CPU parallelism
+        # itself (SYNTH_MAX_CONCURRENCY). Session affinity keeps a client on the
+        # instance holding its document + warmed audio cache.
         run: |
           gcloud run deploy mobiread-backend \
             --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/backend:${GITHUB_SHA::7}" \
             --region="$REGION" --platform=managed --allow-unauthenticated \
             --cpu=4 --memory=4Gi --min-instances=1 --max-instances=10 \
-            --concurrency=1 --timeout=600 \
+            --concurrency=8 --timeout=600 --session-affinity \
             --set-env-vars='^|^TTS_ENGINE=local_kokoro|TTS_VOICE=bf_emma|KOKORO_LANG=en-us|ALIGN_BACKEND=proportional|ENABLE_ALIGNMENT=true|CORS_ORIGIN_REGEX=https://mobiread-frontend-.*\.run\.app'
 
       - name: Read backend URL

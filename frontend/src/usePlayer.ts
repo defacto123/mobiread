@@ -68,7 +68,7 @@ const INITIAL: PlayerState = {
  * it's tempo-independent); karaoke + progress read from it. A generation token
  * discards stale async work.
  */
-export function usePlayer(docId: string | null, numChunks: number, voice?: string) {
+export function usePlayer(docId: string | null, chunks: string[], voice?: string) {
   const [state, setState] = useState<PlayerState>(INITIAL);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -107,11 +107,15 @@ export function usePlayer(docId: string | null, numChunks: number, voice?: strin
   const isPlayingRef = useRef(false);
   const rateRef = useRef(1);
   const docIdRef = useRef(docId);
-  const numChunksRef = useRef(numChunks);
+  const numChunksRef = useRef(chunks.length);
+  // The chunk texts are sent with each request so any backend instance can
+  // serve it, even one that never received this document's upload.
+  const chunksRef = useRef(chunks);
   const voiceRef = useRef(voice);
   const prevVoiceRef = useRef<string | undefined>(voice);
   docIdRef.current = docId;
-  numChunksRef.current = numChunks;
+  numChunksRef.current = chunks.length;
+  chunksRef.current = chunks;
 
   const advanceRef = useRef<() => void>(() => {});
   const preloadNextRef = useRef<() => void>(() => {});
@@ -281,7 +285,7 @@ export function usePlayer(docId: string | null, numChunks: number, voice?: strin
     abortersRef.current.set(key, controller);
     if (prefetch) prefetchKeysRef.current.add(key);
 
-    const p = fetchChunk(docId, index, v, controller.signal)
+    const p = fetchChunk(docId, index, v, controller.signal, chunksRef.current[index])
       .then((loaded) => {
         cacheRef.current.set(key, loaded);
         inflightRef.current.delete(key);
@@ -322,7 +326,7 @@ export function usePlayer(docId: string | null, numChunks: number, voice?: strin
   // Point the backend's background pre-generation at the reader's position.
   const requestWarm = (index: number) => {
     if (!docIdRef.current) return;
-    void warmDoc(docIdRef.current, voiceRef.current, index);
+    void warmDoc(docIdRef.current, voiceRef.current, index, chunksRef.current);
   };
 
   // Load + (optionally) play a chunk from a given offset. Stops any current
