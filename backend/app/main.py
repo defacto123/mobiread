@@ -14,10 +14,12 @@ import base64
 import logging
 import threading
 import uuid
+from typing import TypeVar
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, ValidationError
 
 from app.config import get_settings
 from app.models import (
@@ -35,6 +37,8 @@ from app.synth import get_or_synthesize, get_tts_engine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mobiread")
+
+BodyT = TypeVar("BodyT", bound=BaseModel)
 
 settings = get_settings()
 
@@ -119,11 +123,24 @@ def _require_doc(doc_id: str) -> Document:
     return doc
 
 
+async def _read_body(request: Request, model: type[BodyT]) -> BodyT:
+    """Parse a JSON body sent with any content type.
+
+    Clients send `text/plain` so the browser treats these as CORS "simple
+    requests" and skips the preflight round-trip on every chunk fetch, which
+    means FastAPI won't decode the body for us."""
+    raw = await request.body()
+    if not raw:
+        return model()
+    try:
+        return model.model_validate_json(raw)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid request body: {exc}")
+
+
 @app.post("/chunk/{doc_id}/{index}", response_model=ChunkResponse)
-async def get_chunk(
-    request: Request, doc_id: str, index: int, body: ChunkRequest | None = None
-) -> ChunkResponse:
-    body = body or ChunkRequest()
+async def get_chunk(request: Request, doc_id: str, index: int) -> ChunkResponse:
+    body = await _read_body(request, ChunkRequest)
     doc = store.get(doc_id)
 
     # Requests are spread across instances, so this one may not hold the
@@ -168,12 +185,12 @@ async def get_chunk(
 
 
 @app.post("/warm/{doc_id}", response_model=WarmStatusResponse)
-def warm(doc_id: str, body: WarmRequest | None = None) -> WarmStatusResponse:
+async def warm(request: Request, doc_id: str) -> WarmStatusResponse:
     """Start (or retarget) background pre-generation for a document.
 
     An instance that doesn't know this document adopts it from `chunks` when the
     client supplies them, so pre-generation works wherever the request lands."""
-    body = body or WarmRequest()
+    body = await _read_body(request, WarmRequest)
     doc = store.get(doc_id)
     if doc is None:
         if not body.chunks:

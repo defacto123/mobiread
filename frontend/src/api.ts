@@ -28,9 +28,11 @@ export async function fetchChunk(
   signal?: AbortSignal,
   text?: string,
 ): Promise<LoadedChunk> {
+  // text/plain keeps this a CORS "simple request", avoiding an extra preflight
+  // round-trip per chunk. FastAPI parses the body from the model regardless.
   const resp = await fetch(`${API_BASE}/chunk/${docId}/${index}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "text/plain;charset=UTF-8" },
     body: JSON.stringify({ voice, text }),
     signal,
   });
@@ -61,7 +63,7 @@ export async function warmDoc(
   const post = (body: Record<string, unknown>) =>
     fetch(`${API_BASE}/warm/${docId}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "text/plain;charset=UTF-8" },
       body: JSON.stringify(body),
     });
 

@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     kokoro_model_path: str = "/models/kokoro-v1.0.onnx"
     kokoro_voices_path: str = "/models/voices-v1.0.bin"
     kokoro_lang: str = "en-us"
+    # ONNX Runtime intra-op threads. 0 = derive from the container's CPU limit
+    # (see local_kokoro), which avoids the thread oversubscription that happens
+    # when ONNX sizes its pool from the host's core count.
+    onnx_intra_op_threads: int = 0
 
     # Alignment: "proportional" (no extra deps) or "whisperx" (accurate, heavy)
     enable_alignment: bool = True

@@ -57,12 +57,21 @@ jobs:
         # Scales to zero: an always-warm instance costs ~$51/month to avoid a
         # cold start that is paid once per session and largely overlaps the PDF
         # upload (the model preloads on startup). CPU boost shortens that start.
+        #
+        # Capped at one instance because the audio cache and pre-generation live
+        # in instance memory: spreading a session over several instances made
+        # them useless and synthesized the same chunk up to three times over.
+        # Raising this requires a shared cache first.
+        #
+        # CPU is not throttled between requests, otherwise the background
+        # pre-generation thread barely runs and the cache never fills.
         run: |
           gcloud run deploy mobiread-backend \
             --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/backend:${GITHUB_SHA::7}" \
             --region="$REGION" --platform=managed --allow-unauthenticated \
-            --cpu=4 --memory=4Gi --min-instances=0 --max-instances=10 \
+            --cpu=4 --memory=4Gi --min-instances=0 --max-instances=1 \
             --concurrency=8 --timeout=600 --session-affinity --cpu-boost \
+            --no-cpu-throttling \
             --set-env-vars='^|^TTS_ENGINE=local_kokoro|TTS_VOICE=bf_emma|KOKORO_LANG=en-us|ALIGN_BACKEND=proportional|ENABLE_ALIGNMENT=true|CORS_ORIGIN_REGEX=https://mobiread-frontend-.*\.run\.app'
 
       - name: Read backend URL
